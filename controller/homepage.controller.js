@@ -1,34 +1,13 @@
-import fs from 'fs';
-import { BAD_REQUEST, NOT_FOUND, INTERNAL_SERVER_ERROR } from '../error/error.js';
+import cleanupUploadedFiles, {
+    handleCloudinaryUpload,
+    handleMultipleCloudinaryUploads,
+    safeJsonParse
+} from '../utils/cleanup.helper.utils.js';
+import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import homepageModel from '../model/homepage.model.js';
-import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function that supports req.file, req.files as Array, and req.files as Object (multer.fields)
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting single file:', err);
-        });
-    }
-    if (req.files) {
-        if (Array.isArray(req.files)) {
-            req.files.forEach((f) => {
-                fs.unlink(f.path, (err) => {
-                    if (err) console.error('Error deleting array file:', err);
-                });
-            });
-        } else {
-            Object.keys(req.files).forEach((key) => {
-                req.files[key].forEach((f) => {
-                    fs.unlink(f.path, (err) => {
-                        if (err) console.error(`Error deleting field file [${key}]:`, err);
-                    });
-                });
-            });
-        }
-    }
-}
+import { deleteFromCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
 
 // Helper to get or create homepage document
 async function getOrCreateHomepage() {
@@ -47,7 +26,7 @@ async function getOrCreateHomepage() {
 // 1. Get Homepage Content
 const getHomepage = asyncWrapper(async (req, res) => {
     const homepage = await getOrCreateHomepage();
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: homepage
     });
@@ -62,20 +41,16 @@ const updateHero = asyncWrapper(async (req, res) => {
 
     // Parse existingImages if sent from frontend to know which images to keep
     if (existingImages) {
-        let keptImages = [];
-        try {
-            keptImages = typeof existingImages === 'string' ? JSON.parse(existingImages) : existingImages;
-        } catch (err) {
-            safeCleanup(req);
-            throw new BAD_REQUEST('Invalid existingImages JSON format');
-        }
-
-        // Find images to delete from Cloudinary
+        const keptImages = safeJsonParse(req, existingImages, 'Invalid existingImages JSON format');
         const keptPublicIds = new Set(keptImages.map(img => img.publicId));
         const imagesToDelete = homepage.hero.backgroundImages.filter(img => !keptPublicIds.has(img.publicId));
 
         for (const img of imagesToDelete) {
-            await deleteFromCloud(img.publicId);
+            try {
+                await deleteFromCloud(img.publicId);
+            } catch (delErr) {
+                console.error("Non-blocking error deleting old hero background asset from Cloudinary:", delErr);
+            }
         }
 
         finalBackgroundImages = homepage.hero.backgroundImages.filter(img => keptPublicIds.has(img.publicId));
@@ -83,20 +58,7 @@ const updateHero = asyncWrapper(async (req, res) => {
 
     // Upload new files if provided
     if (req.files && req.files.length > 0) {
-        const uploadedImages = [];
-        try {
-            for (const file of req.files) {
-                const cloudResult = await uploadToCloud(file.path);
-                uploadedImages.push(cloudResult);
-            }
-        } catch (err) {
-            // Clean up any uploaded to Cloudinary in this failure batch
-            for (const img of uploadedImages) {
-                await deleteFromCloud(img.publicId);
-            }
-            safeCleanup(req);
-            throw err;
-        }
+        const uploadedImages = await handleMultipleCloudinaryUploads(req, req.files);
         finalBackgroundImages.push(...uploadedImages);
     }
 
@@ -105,9 +67,9 @@ const updateHero = asyncWrapper(async (req, res) => {
     homepage.hero.backgroundImages = finalBackgroundImages;
 
     await homepage.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Hero section updated successfully',
         data: homepage.hero
@@ -122,14 +84,7 @@ const addEvent = asyncWrapper(async (req, res) => {
     }
 
     const homepage = await getOrCreateHomepage();
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     const newEvent = {
         image: cloudResult,
@@ -140,12 +95,12 @@ const addEvent = asyncWrapper(async (req, res) => {
 
     homepage.events.push(newEvent);
     await homepage.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     // Get the newly added event with its auto-generated ID
     const addedEvent = homepage.events[homepage.events.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Event added successfully',
         data: addedEvent
@@ -161,22 +116,13 @@ const updateEvent = asyncWrapper(async (req, res) => {
     const event = homepage.events.id(eventId);
 
     if (!event) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Event not found');
     }
 
     let newImage = event.image;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-        // Delete old image from Cloudinary
-        await deleteFromCloud(event.image.publicId);
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, event.image.publicId);
     }
 
     if (name !== undefined) event.name = name;
@@ -185,9 +131,9 @@ const updateEvent = asyncWrapper(async (req, res) => {
     event.image = newImage;
 
     await homepage.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Event updated successfully',
         data: event
@@ -206,13 +152,17 @@ const deleteEvent = asyncWrapper(async (req, res) => {
     }
 
     // Delete image from Cloudinary
-    await deleteFromCloud(event.image.publicId);
+    try {
+        await deleteFromCloud(event.image.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting event image from Cloudinary:", error);
+    }
 
     // Remove from array
     homepage.events.pull(eventId);
     await homepage.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Event deleted successfully'
     });
@@ -227,7 +177,7 @@ const updateAboutUs = asyncWrapper(async (req, res) => {
 
     await homepage.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'About Us section updated successfully',
         data: homepage.aboutUs
@@ -239,29 +189,23 @@ const addBrandCard = asyncWrapper(async (req, res) => {
     const { heading, paragraphs } = req.body;
 
     if (!req.files || !req.files['image'] || !req.files['icon']) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new BAD_REQUEST('Both image and icon are required for a brand card');
     }
 
     const homepage = await getOrCreateHomepage();
     let imageCloud, iconCloud;
 
+    imageCloud = await handleCloudinaryUpload(req, req.files['image'][0]);
     try {
-        imageCloud = await uploadToCloud(req.files['image'][0].path);
-        iconCloud = await uploadToCloud(req.files['icon'][0].path);
+        iconCloud = await handleCloudinaryUpload(req, req.files['icon'][0]);
     } catch (err) {
-        // Clean up Cloudinary if one succeeded
         if (imageCloud) await deleteFromCloud(imageCloud.publicId);
-        if (iconCloud) await deleteFromCloud(iconCloud.publicId);
-        safeCleanup(req);
         throw err;
     }
 
     // Parse paragraphs if sent as JSON string
-    let finalParagraphs = [];
-    if (paragraphs) {
-        finalParagraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
-    }
+    const finalParagraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
 
     const newCard = {
         image: imageCloud,
@@ -272,11 +216,11 @@ const addBrandCard = asyncWrapper(async (req, res) => {
 
     homepage.brandCards.push(newCard);
     await homepage.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const addedCard = homepage.brandCards[homepage.brandCards.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Brand card added successfully',
         data: addedCard
@@ -292,33 +236,24 @@ const updateBrandCard = asyncWrapper(async (req, res) => {
     const card = homepage.brandCards.id(cardId);
 
     if (!card) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Brand card not found');
     }
 
     let newImage = card.image;
     let newIcon = card.icon;
 
-    try {
-        if (req.files && req.files['image']) {
-            const cloudResult = await uploadToCloud(req.files['image'][0].path);
-            await deleteFromCloud(card.image.publicId);
-            newImage = cloudResult;
-        }
+    if (req.files && req.files['image']) {
+        newImage = await handleCloudinaryUpload(req, req.files['image'][0], card.image.publicId);
+    }
 
-        if (req.files && req.files['icon']) {
-            const cloudResult = await uploadToCloud(req.files['icon'][0].path);
-            await deleteFromCloud(card.icon.publicId);
-            newIcon = cloudResult;
-        }
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
+    if (req.files && req.files['icon']) {
+        newIcon = await handleCloudinaryUpload(req, req.files['icon'][0], card.icon.publicId);
     }
 
     // Parse paragraphs if provided
     if (paragraphs !== undefined) {
-        card.paragraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
+        card.paragraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
     }
 
     if (heading !== undefined) card.heading = heading;
@@ -326,9 +261,9 @@ const updateBrandCard = asyncWrapper(async (req, res) => {
     card.icon = newIcon;
 
     await homepage.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Brand card updated successfully',
         data: card
@@ -347,14 +282,18 @@ const deleteBrandCard = asyncWrapper(async (req, res) => {
     }
 
     // Delete image and icon from Cloudinary
-    await deleteFromCloud(card.image.publicId);
-    await deleteFromCloud(card.icon.publicId);
+    try {
+        await deleteFromCloud(card.image.publicId);
+        await deleteFromCloud(card.icon.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting brand card assets from Cloudinary:", error);
+    }
 
     // Remove from array
     homepage.brandCards.pull(cardId);
     await homepage.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Brand card deleted successfully'
     });

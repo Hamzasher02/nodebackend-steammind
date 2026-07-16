@@ -1,17 +1,11 @@
-import fs from 'fs';
+import cleanupUploadedFiles, {
+    handleCloudinaryUpload
+} from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import contactUsPageModel from '../model/contactuspage.model.js';
-import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function to remove local uploads
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
-    }
-}
+import { deleteFromCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
 
 // Helper to get or create the page document
 async function getOrCreateContactUsPage() {
@@ -28,7 +22,7 @@ async function getOrCreateContactUsPage() {
 // 1. Get Contact Us Page Content
 const getContactUsPage = asyncWrapper(async (req, res) => {
     const page = await getOrCreateContactUsPage();
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: page
     });
@@ -42,18 +36,7 @@ const updateSection1 = asyncWrapper(async (req, res) => {
     let newImage = page.section1.backgroundImage;
 
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-
-        if (page.section1.backgroundImage?.publicId) {
-            await deleteFromCloud(page.section1.backgroundImage.publicId);
-        }
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, page.section1.backgroundImage?.publicId);
     }
 
     if (heading !== undefined) page.section1.heading = heading;
@@ -63,9 +46,9 @@ const updateSection1 = asyncWrapper(async (req, res) => {
     page.section1.backgroundImage = newImage;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Section 1 updated successfully',
         data: page.section1
@@ -81,14 +64,7 @@ const addLocation = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateContactUsPage();
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     const newLocation = {
         icon: cloudResult,
@@ -97,11 +73,11 @@ const addLocation = asyncWrapper(async (req, res) => {
 
     page.locations.push(newLocation);
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.locations[page.locations.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Location card added successfully',
         data: added
@@ -117,31 +93,22 @@ const updateLocation = asyncWrapper(async (req, res) => {
     const locCard = page.locations.id(locationId);
 
     if (!locCard) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Location card not found');
     }
 
     let newIcon = locCard.icon;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-
-        await deleteFromCloud(locCard.icon.publicId);
-        newIcon = cloudResult;
+        newIcon = await handleCloudinaryUpload(req, req.file, locCard.icon.publicId);
     }
 
     if (location !== undefined) locCard.location = location;
     locCard.icon = newIcon;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Location card updated successfully',
         data: locCard
@@ -159,12 +126,16 @@ const deleteLocation = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Location card not found');
     }
 
-    await deleteFromCloud(locCard.icon.publicId);
+    try {
+        await deleteFromCloud(locCard.icon.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting location icon from Cloudinary:", error);
+    }
 
     page.locations.pull(locationId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Location card deleted successfully'
     });

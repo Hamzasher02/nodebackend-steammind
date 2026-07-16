@@ -1,17 +1,8 @@
-import fs from 'fs';
+import cleanupUploadedFiles from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import competitionModel from '../model/competition.model.js';
 import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function to remove local uploads
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
-    }
-}
 
 // Helper to parse JSON or array
 function parseJsonOrArray(input) {
@@ -136,7 +127,7 @@ const createCompetition = asyncWrapper(async (req, res) => {
     // Check slug uniqueness
     const existing = await competitionModel.findOne({ urlSlug: urlSlug.toLowerCase() });
     if (existing) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new BAD_REQUEST('URL Slug is already in use');
     }
 
@@ -144,7 +135,7 @@ const createCompetition = asyncWrapper(async (req, res) => {
     try {
         cloudResult = await uploadToCloud(req.file.path);
     } catch (err) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw err;
     }
 
@@ -172,7 +163,7 @@ const createCompetition = asyncWrapper(async (req, res) => {
         status: status || 'draft'
     });
 
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     res.status(201).json({
         success: true,
@@ -204,14 +195,14 @@ const updateCompetition = asyncWrapper(async (req, res) => {
 
     const comp = await competitionModel.findById(competitionId);
     if (!comp) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Competition not found');
     }
 
     if (urlSlug) {
         const existing = await competitionModel.findOne({ urlSlug: urlSlug.toLowerCase(), _id: { $ne: competitionId } });
         if (existing) {
-            safeCleanup(req);
+            cleanupUploadedFiles(req);
             throw new BAD_REQUEST('URL Slug is already in use by another competition');
         }
         comp.urlSlug = urlSlug.toLowerCase();
@@ -223,7 +214,7 @@ const updateCompetition = asyncWrapper(async (req, res) => {
         try {
             cloudResult = await uploadToCloud(req.file.path);
         } catch (err) {
-            safeCleanup(req);
+            cleanupUploadedFiles(req);
             throw err;
         }
 
@@ -252,7 +243,7 @@ const updateCompetition = asyncWrapper(async (req, res) => {
     comp.thumbnail = newThumbnail;
 
     await comp.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     res.status(200).json({
         success: true,

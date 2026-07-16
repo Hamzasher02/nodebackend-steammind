@@ -1,17 +1,12 @@
-import fs from 'fs';
+import cleanupUploadedFiles, {
+    handleCloudinaryUpload,
+    safeJsonParse
+} from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import campPageModel from '../model/camppage.model.js';
-import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function to remove local uploads
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
-    }
-}
+import { deleteFromCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
 
 // Helper to get or create camp page document based on pageType (summer/winter)
 async function getOrCreateCampPage(pageType) {
@@ -31,7 +26,7 @@ async function getOrCreateCampPage(pageType) {
 const getCampPage = asyncWrapper(async (req, res) => {
     const { pageType } = req.params;
     const page = await getOrCreateCampPage(pageType);
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: page
     });
@@ -46,30 +41,19 @@ const updateSection1 = asyncWrapper(async (req, res) => {
     let newImage = page.section1.image;
 
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-
-        if (page.section1.image?.publicId) {
-            await deleteFromCloud(page.section1.image.publicId);
-        }
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, page.section1.image?.publicId);
     }
 
     if (heading !== undefined) page.section1.heading = heading;
     if (paragraphs !== undefined) {
-        page.section1.paragraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
+        page.section1.paragraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
     }
     page.section1.image = newImage;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Section 1 updated successfully',
         data: page.section1
@@ -86,14 +70,7 @@ const addDetailItem = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateCampPage(pageType);
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     const newDetail = {
         icon: cloudResult,
@@ -103,11 +80,11 @@ const addDetailItem = asyncWrapper(async (req, res) => {
 
     page.details.push(newDetail);
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.details[page.details.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Detail item added successfully',
         data: added
@@ -123,22 +100,13 @@ const updateDetailItem = asyncWrapper(async (req, res) => {
     const detail = page.details.id(detailId);
 
     if (!detail) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Detail item not found');
     }
 
     let newIcon = detail.icon;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-
-        await deleteFromCloud(detail.icon.publicId);
-        newIcon = cloudResult;
+        newIcon = await handleCloudinaryUpload(req, req.file, detail.icon.publicId);
     }
 
     if (label !== undefined) detail.label = label;
@@ -146,9 +114,9 @@ const updateDetailItem = asyncWrapper(async (req, res) => {
     detail.icon = newIcon;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Detail item updated successfully',
         data: detail
@@ -166,12 +134,16 @@ const deleteDetailItem = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Detail item not found');
     }
 
-    await deleteFromCloud(detail.icon.publicId);
+    try {
+        await deleteFromCloud(detail.icon.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting detail icon from Cloudinary:", error);
+    }
 
     page.details.pull(detailId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Detail item deleted successfully'
     });
@@ -194,7 +166,7 @@ const addAdvantageCard = asyncWrapper(async (req, res) => {
 
     const added = page.advantages[page.advantages.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Advantage card added successfully',
         data: added
@@ -218,7 +190,7 @@ const updateAdvantageCard = asyncWrapper(async (req, res) => {
 
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Advantage card updated successfully',
         data: adv
@@ -239,7 +211,7 @@ const deleteAdvantageCard = asyncWrapper(async (req, res) => {
     page.advantages.pull(advantageId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Advantage card deleted successfully'
     });

@@ -1,18 +1,26 @@
-import { NOT_FOUND, BAD_REQUEST } from '../error/error.js';
+import { NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import chatModel from '../model/chat.model.js';
 import messageModel from '../model/message.model.js';
 import documentModel from '../model/document.model.js';
 import flaggedMessageModel from '../model/flaggedmessage.model.js';
 import userModel from '../model/user.model.js';
-import { deleteFromCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
+import {
+    emitMessageUpdated,
+    emitMessageRemoved,
+    emitChatTerminated,
+    emitChatRestored,
+    emitUserBlocked,
+    emitUserUnblocked
+} from '../utils/socket.helper.utils.js';
 
 // 1. Get all chats (Admin Side)
 const adminGetAllChats = asyncWrapper(async (req, res) => {
     const chats = await chatModel.find({ isDeleted: false })
         .populate('participants', 'firstName lastName email profilePicture role accountStatus');
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: chats
     });
@@ -26,7 +34,7 @@ const adminGetChatMessages = asyncWrapper(async (req, res) => {
         .populate('documentId')
         .sort({ createdAt: 1 });
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: messages
     });
@@ -47,19 +55,9 @@ const adminEditMessage = asyncWrapper(async (req, res) => {
     message.editedAt = new Date();
     await message.save();
 
-    // Socket notification: message:updated
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('message:updated', {
-            messageId: message._id,
-            chatId: message.chatId,
-            messageText: message.messageText,
-            editedAt: message.editedAt,
-            editedByAdmin: true
-        });
-    }
+    emitMessageUpdated(req, message, { editedByAdmin: true });
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Message edited by admin successfully',
         data: message
@@ -79,16 +77,9 @@ const adminDeleteMessage = asyncWrapper(async (req, res) => {
     message.deletedAt = new Date();
     await message.save();
 
-    // Socket notification: message:removed
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('message:removed', {
-            messageId: message._id,
-            chatId: message.chatId
-        });
-    }
+    emitMessageRemoved(req, message);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Message soft deleted by admin successfully',
         data: message
@@ -108,18 +99,9 @@ const adminRecoverMessage = asyncWrapper(async (req, res) => {
     message.deletedAt = null;
     await message.save();
 
-    // Socket notification: message:updated / restored
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('message:updated', {
-            messageId: message._id,
-            chatId: message.chatId,
-            messageText: message.messageText,
-            recovered: true
-        });
-    }
+    emitMessageUpdated(req, message, { recovered: true });
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Message recovered successfully',
         data: message
@@ -139,7 +121,7 @@ const adminUpdateDocument = asyncWrapper(async (req, res) => {
     doc.file.originalName = originalName;
     await doc.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Document metadata updated successfully',
         data: doc
@@ -162,7 +144,7 @@ const adminDeleteDocument = asyncWrapper(async (req, res) => {
     // Clear documentId link in parent message if applicable
     await messageModel.updateOne({ documentId: doc._id }, { $set: { documentId: null } });
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Document soft deleted successfully',
         data: doc
@@ -185,7 +167,7 @@ const adminRecoverDocument = asyncWrapper(async (req, res) => {
     // Relink document to parent message if message exists
     await messageModel.updateOne({ _id: doc.messageId }, { $set: { documentId: doc._id } });
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Document recovered successfully',
         data: doc
@@ -204,15 +186,9 @@ const adminTerminateChat = asyncWrapper(async (req, res) => {
     chat.status = 'terminated';
     await chat.save();
 
-    // Socket notification: chat:terminated
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('chat:terminated', {
-            chatId: chat._id
-        });
-    }
+    emitChatTerminated(req, chat);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Chat communication terminated by admin successfully',
         data: chat
@@ -231,15 +207,9 @@ const adminRestoreChat = asyncWrapper(async (req, res) => {
     chat.status = 'active';
     await chat.save();
 
-    // Socket notification: chat:restored
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('chat:restored', {
-            chatId: chat._id
-        });
-    }
+    emitChatRestored(req, chat);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Chat communication restored by admin successfully',
         data: chat
@@ -253,7 +223,7 @@ const adminGetFlaggedMessages = asyncWrapper(async (req, res) => {
         .populate('senderId', 'firstName lastName email')
         .populate('flaggedBy', 'firstName lastName email');
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: flags
     });
@@ -272,7 +242,7 @@ const adminGetFlaggedMessageDetail = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Flagged message snapshot not found');
     }
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: flag
     });
@@ -289,7 +259,7 @@ const adminDeleteFlaggedMessage = asyncWrapper(async (req, res) => {
 
     await flag.deleteOne();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Flagged message snapshot deleted from moderation logs successfully'
     });
@@ -307,15 +277,9 @@ const adminBlockUser = asyncWrapper(async (req, res) => {
     user.accountStatus = 'inactive';
     await user.save();
 
-    // Socket notification: user:blocked
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('user:blocked', {
-            userId: user._id
-        });
-    }
+    emitUserBlocked(req, user);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'User blocked and account deactivated successfully',
         data: user
@@ -334,15 +298,9 @@ const adminUnblockUser = asyncWrapper(async (req, res) => {
     user.accountStatus = 'active';
     await user.save();
 
-    // Socket notification: user:unblocked
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('user:unblocked', {
-            userId: user._id
-        });
-    }
+    emitUserUnblocked(req, user);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'User unblocked and account activated successfully',
         data: user

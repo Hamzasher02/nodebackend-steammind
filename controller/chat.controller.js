@@ -1,4 +1,4 @@
-import fs from 'fs';
+import cleanupUploadedFiles, { handleCloudinaryUpload } from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST, NOT_FOUND, UNAUTHORIZED } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import chatModel from '../model/chat.model.js';
@@ -6,15 +6,34 @@ import messageModel from '../model/message.model.js';
 import documentModel from '../model/document.model.js';
 import flaggedMessageModel from '../model/flaggedmessage.model.js';
 import userModel from '../model/user.model.js';
-import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
+import {
+    emitMessageSent,
+    emitMessageUpdated,
+    emitMessageFlagged,
+    emitDocumentUploaded
+} from '../utils/socket.helper.utils.js';
 
-// Safe cleanup for local uploads
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
+// Helper to consolidate chat existence, participation, and termination validations
+async function getAndValidateChat(chatId, userId, checkParticipant = true, checkTerminated = true, reqForCleanup = null) {
+    const query = { _id: chatId, isDeleted: false };
+    if (checkParticipant) {
+        query.participants = userId;
     }
+    const chat = await chatModel.findOne(query);
+    if (!chat) {
+        if (reqForCleanup) cleanupUploadedFiles(reqForCleanup);
+        if (checkParticipant) {
+            throw new NOT_FOUND('Chat thread not found or access denied');
+        } else {
+            throw new NOT_FOUND('Chat thread not found');
+        }
+    }
+    if (checkTerminated && chat.status === 'terminated') {
+        if (reqForCleanup) cleanupUploadedFiles(reqForCleanup);
+        throw new BAD_REQUEST('This chat communication has been terminated by an admin');
+    }
+    return chat;
 }
 
 // 1. Create chat with instructor (Student Side only)
@@ -48,7 +67,7 @@ const createChat = asyncWrapper(async (req, res) => {
         });
     }
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Chat thread created successfully',
         data: chat
@@ -64,7 +83,7 @@ const getAllChats = asyncWrapper(async (req, res) => {
         isDeleted: false
     }).populate('participants', 'firstName lastName email profilePicture role');
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: chats
     });
@@ -75,11 +94,8 @@ const getChatMessages = asyncWrapper(async (req, res) => {
     const { chatId } = req.params;
     const userId = req.user.userId;
 
-    // Verify user is participant in the chat
-    const chat = await chatModel.findOne({ _id: chatId, participants: userId, isDeleted: false });
-    if (!chat) {
-        throw new NOT_FOUND('Chat thread not found or access denied');
-    }
+    // Verify user is participant in the chat (terminated chats can still be viewed)
+    await getAndValidateChat(chatId, userId, true, false);
 
     const messages = await messageModel.find({
         chatId,
@@ -88,7 +104,7 @@ const getChatMessages = asyncWrapper(async (req, res) => {
     .populate('documentId')
     .sort({ createdAt: 1 });
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: messages
     });
@@ -106,15 +122,8 @@ const sendMessage = asyncWrapper(async (req, res) => {
         throw new UNAUTHORIZED('Your account is blocked or inactive');
     }
 
-    // Verify chat exists and user is participant
-    const chat = await chatModel.findOne({ _id: chatId, participants: userId, isDeleted: false });
-    if (!chat) {
-        throw new NOT_FOUND('Chat thread not found or access denied');
-    }
-
-    if (chat.status === 'terminated') {
-        throw new BAD_REQUEST('This chat communication has been terminated by an admin');
-    }
+    // Verify chat exists, user is participant, and chat is active
+    await getAndValidateChat(chatId, userId, true, true);
 
     const message = await messageModel.create({
         chatId,
@@ -122,24 +131,9 @@ const sendMessage = asyncWrapper(async (req, res) => {
         messageText: messageText || ''
     });
 
-    // Real-time notifications: message:sent & message:received
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('message:sent', {
-            chatId,
-            messageId: message._id,
-            senderId: userId,
-            messageText: message.messageText,
-            createdAt: message.createdAt
-        });
-        io.emit('message:received', {
-            chatId,
-            messageId: message._id,
-            senderId: userId
-        });
-    }
+    emitMessageSent(req, message);
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Message sent successfully',
         data: message
@@ -157,14 +151,8 @@ const editOwnMessage = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Message not found or you are not authorized to edit this message');
     }
 
-    // Verify chat is not terminated
-    const chat = await chatModel.findOne({ _id: message.chatId, isDeleted: false });
-    if (!chat) {
-        throw new NOT_FOUND('Chat thread not found');
-    }
-    if (chat.status === 'terminated') {
-        throw new BAD_REQUEST('This chat communication has been terminated by an admin');
-    }
+    // Verify chat is active (not terminated)
+    await getAndValidateChat(message.chatId, userId, false, true);
 
     // Verify within 24 hours
     const limitTime = 24 * 60 * 60 * 1000;
@@ -177,18 +165,9 @@ const editOwnMessage = asyncWrapper(async (req, res) => {
     message.editedAt = new Date();
     await message.save();
 
-    // Real-time notification: message:updated
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('message:updated', {
-            messageId: message._id,
-            chatId: message.chatId,
-            messageText: message.messageText,
-            editedAt: message.editedAt
-        });
-    }
+    emitMessageUpdated(req, message);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Message updated successfully',
         data: message
@@ -222,18 +201,9 @@ const flagMessage = asyncWrapper(async (req, res) => {
         messageSnapshot: message.messageText
     });
 
-    // Real-time notification: message:flagged
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('message:flagged', {
-            flagId: flagged._id,
-            messageId: message._id,
-            chatId: message.chatId,
-            reason
-        });
-    }
+    emitMessageFlagged(req, flagged, message, reason);
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Message flagged successfully',
         data: flagged
@@ -251,28 +221,14 @@ const uploadDocument = asyncWrapper(async (req, res) => {
 
     const message = await messageModel.findOne({ _id: messageId, senderId: userId, isDeleted: false });
     if (!message) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Message not found or you are not authorized');
     }
 
     // Verify chat is not terminated
-    const chat = await chatModel.findOne({ _id: message.chatId, isDeleted: false });
-    if (!chat) {
-        safeCleanup(req);
-        throw new NOT_FOUND('Chat thread not found');
-    }
-    if (chat.status === 'terminated') {
-        safeCleanup(req);
-        throw new BAD_REQUEST('This chat communication has been terminated by an admin');
-    }
+    await getAndValidateChat(message.chatId, userId, false, true, req);
 
-    let cloudResult;
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     const document = await documentModel.create({
         messageId: message._id,
@@ -288,20 +244,11 @@ const uploadDocument = asyncWrapper(async (req, res) => {
     message.documentId = document._id;
     await message.save();
 
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    // Real-time notification: document:uploaded
-    const io = req.app.get('io');
-    if (io) {
-        io.emit('document:uploaded', {
-            documentId: document._id,
-            messageId: message._id,
-            chatId: message.chatId,
-            fileName: req.file.originalname
-        });
-    }
+    emitDocumentUploaded(req, document, message, req.file.originalname);
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Document uploaded successfully',
         data: document
@@ -317,7 +264,7 @@ const getDocumentDetails = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Document not found');
     }
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: doc
     });

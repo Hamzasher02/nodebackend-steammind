@@ -1,17 +1,11 @@
-import fs from 'fs';
+import cleanupUploadedFiles, {
+    handleCloudinaryUpload
+} from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import coursesPageModel from '../model/coursespage.model.js';
-import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function to remove local uploads
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
-    }
-}
+import { deleteFromCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
 
 // Helper to get or create the courses page document
 async function getOrCreateCoursesPage() {
@@ -28,7 +22,7 @@ async function getOrCreateCoursesPage() {
 // 1. Get Courses Page Content
 const getCoursesPage = asyncWrapper(async (req, res) => {
     const page = await getOrCreateCoursesPage();
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: page
     });
@@ -42,19 +36,7 @@ const updateSection1 = asyncWrapper(async (req, res) => {
     let newImage = page.section1.backgroundImage;
 
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-
-        // Delete old image if it exists
-        if (page.section1.backgroundImage?.publicId) {
-            await deleteFromCloud(page.section1.backgroundImage.publicId);
-        }
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, page.section1.backgroundImage?.publicId);
     }
 
     if (heading !== undefined) page.section1.heading = heading;
@@ -62,9 +44,9 @@ const updateSection1 = asyncWrapper(async (req, res) => {
     page.section1.backgroundImage = newImage;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Section 1 updated successfully',
         data: page.section1
@@ -80,14 +62,7 @@ const addCourse = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateCoursesPage();
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     const newCourse = {
         thumbnail: cloudResult,
@@ -101,11 +76,11 @@ const addCourse = asyncWrapper(async (req, res) => {
 
     page.courses.push(newCourse);
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const addedCourse = page.courses[page.courses.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Course added to CMS page successfully',
         data: addedCourse
@@ -121,23 +96,13 @@ const updateCourse = asyncWrapper(async (req, res) => {
     const course = page.courses.id(courseId);
 
     if (!course) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Course not found on CMS page');
     }
 
     let newThumbnail = course.thumbnail;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-
-        // Delete old thumbnail from Cloudinary
-        await deleteFromCloud(course.thumbnail.publicId);
-        newThumbnail = cloudResult;
+        newThumbnail = await handleCloudinaryUpload(req, req.file, course.thumbnail.publicId);
     }
 
     if (title !== undefined) course.title = title;
@@ -149,9 +114,9 @@ const updateCourse = asyncWrapper(async (req, res) => {
     course.thumbnail = newThumbnail;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Course updated successfully',
         data: course
@@ -170,13 +135,17 @@ const deleteCourse = asyncWrapper(async (req, res) => {
     }
 
     // Delete thumbnail from Cloudinary
-    await deleteFromCloud(course.thumbnail.publicId);
+    try {
+        await deleteFromCloud(course.thumbnail.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting course thumbnail from Cloudinary:", error);
+    }
 
     // Remove from array
     page.courses.pull(courseId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Course deleted from CMS page successfully'
     });

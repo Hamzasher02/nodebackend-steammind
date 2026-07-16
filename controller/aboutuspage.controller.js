@@ -1,35 +1,13 @@
-import fs from 'fs';
+import cleanupUploadedFiles, {
+    handleCloudinaryUpload,
+    handleMultipleCloudinaryUploads,
+    safeJsonParse
+} from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import aboutUsPageModel from '../model/aboutuspage.model.js';
-import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function supporting single file, array of files, and object of fields
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting single file:', err);
-        });
-    }
-    if (req.files) {
-        if (Array.isArray(req.files)) {
-            req.files.forEach((f) => {
-                fs.unlink(f.path, (err) => {
-                    if (err) console.error('Error deleting array file:', err);
-                });
-            });
-        } else {
-            Object.keys(req.files).forEach((key) => {
-                req.files[key].forEach((f) => {
-                    fs.unlink(f.path, (err) => {
-                        if (err) console.error(`Error deleting field file [${key}]:`, err);
-                    });
-                });
-            });
-        }
-    }
-}
-
+import { deleteFromCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
 // Helper to get or create the page document
 async function getOrCreateAboutUsPage() {
     let page = await aboutUsPageModel.findOne();
@@ -52,7 +30,7 @@ async function getOrCreateAboutUsPage() {
 // 1. Get About Us Page Content
 const getAboutUsPage = asyncWrapper(async (req, res) => {
     const page = await getOrCreateAboutUsPage();
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: page
     });
@@ -66,14 +44,7 @@ const updateHero = asyncWrapper(async (req, res) => {
     let finalBackgroundImages = [...page.hero.backgroundImages];
 
     if (existingImages) {
-        let keptImages = [];
-        try {
-            keptImages = typeof existingImages === 'string' ? JSON.parse(existingImages) : existingImages;
-        } catch (err) {
-            safeCleanup(req);
-            throw new BAD_REQUEST('Invalid existingImages JSON format');
-        }
-
+        const keptImages = safeJsonParse(req, existingImages, 'Invalid existingImages JSON format');
         const keptPublicIds = new Set(keptImages.map(img => img.publicId));
         const imagesToDelete = page.hero.backgroundImages.filter(img => !keptPublicIds.has(img.publicId));
 
@@ -85,27 +56,15 @@ const updateHero = asyncWrapper(async (req, res) => {
     }
 
     if (req.files && req.files.length > 0) {
-        const uploadedImages = [];
-        try {
-            for (const file of req.files) {
-                const cloudResult = await uploadToCloud(file.path);
-                uploadedImages.push(cloudResult);
-            }
-        } catch (err) {
-            for (const img of uploadedImages) {
-                await deleteFromCloud(img.publicId);
-            }
-            safeCleanup(req);
-            throw err;
-        }
+        const uploadedImages = await handleMultipleCloudinaryUploads(req, req.files);
         finalBackgroundImages.push(...uploadedImages);
     }
 
     page.hero.backgroundImages = finalBackgroundImages;
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Hero background images updated successfully',
         data: page.hero
@@ -117,15 +76,12 @@ const updateIntroduction = asyncWrapper(async (req, res) => {
     const { paragraphs } = req.body;
     const page = await getOrCreateAboutUsPage();
 
-    let finalParagraphs = [];
-    if (paragraphs) {
-        finalParagraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
-    }
+    const finalParagraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
 
     page.introduction.paragraphs = finalParagraphs;
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Introduction paragraphs updated successfully',
         data: page.introduction
@@ -137,27 +93,22 @@ const addPlatform = asyncWrapper(async (req, res) => {
     const { title, paragraphs } = req.body;
 
     if (!req.files || !req.files['image'] || !req.files['icon']) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new BAD_REQUEST('Both image and icon files are required for platform');
     }
 
     const page = await getOrCreateAboutUsPage();
     let imageCloud, iconCloud;
 
+    imageCloud = await handleCloudinaryUpload(req, req.files['image'][0]);
     try {
-        imageCloud = await uploadToCloud(req.files['image'][0].path);
-        iconCloud = await uploadToCloud(req.files['icon'][0].path);
+        iconCloud = await handleCloudinaryUpload(req, req.files['icon'][0]);
     } catch (err) {
         if (imageCloud) await deleteFromCloud(imageCloud.publicId);
-        if (iconCloud) await deleteFromCloud(iconCloud.publicId);
-        safeCleanup(req);
         throw err;
     }
 
-    let finalParagraphs = [];
-    if (paragraphs) {
-        finalParagraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
-    }
+    const finalParagraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
 
     const newPlatform = {
         image: imageCloud,
@@ -168,11 +119,11 @@ const addPlatform = asyncWrapper(async (req, res) => {
 
     page.platforms.push(newPlatform);
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.platforms[page.platforms.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Platform added successfully',
         data: added
@@ -187,41 +138,32 @@ const updatePlatform = asyncWrapper(async (req, res) => {
     const platform = page.platforms.id(platformId);
 
     if (!platform) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Platform not found');
     }
 
     let newImage = platform.image;
     let newIcon = platform.icon;
 
-    try {
-        if (req.files && req.files['image']) {
-            const cloudResult = await uploadToCloud(req.files['image'][0].path);
-            await deleteFromCloud(platform.image.publicId);
-            newImage = cloudResult;
-        }
+    if (req.files && req.files['image']) {
+        newImage = await handleCloudinaryUpload(req, req.files['image'][0], platform.image.publicId);
+    }
 
-        if (req.files && req.files['icon']) {
-            const cloudResult = await uploadToCloud(req.files['icon'][0].path);
-            await deleteFromCloud(platform.icon.publicId);
-            newIcon = cloudResult;
-        }
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
+    if (req.files && req.files['icon']) {
+        newIcon = await handleCloudinaryUpload(req, req.files['icon'][0], platform.icon.publicId);
     }
 
     if (title !== undefined) platform.title = title;
     if (paragraphs !== undefined) {
-        platform.paragraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
+        platform.paragraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
     }
     platform.image = newImage;
     platform.icon = newIcon;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Platform updated successfully',
         data: platform
@@ -238,13 +180,17 @@ const deletePlatform = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Platform not found');
     }
 
-    await deleteFromCloud(platform.image.publicId);
-    await deleteFromCloud(platform.icon.publicId);
+    try {
+        await deleteFromCloud(platform.image.publicId);
+        await deleteFromCloud(platform.icon.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting platform assets from Cloudinary:", error);
+    }
 
     page.platforms.pull(platformId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Platform deleted successfully'
     });
@@ -255,27 +201,22 @@ const addMissionSection = asyncWrapper(async (req, res) => {
     const { title, heading, paragraphs } = req.body;
 
     if (!req.files || !req.files['image'] || !req.files['icon']) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new BAD_REQUEST('Both image and icon files are required');
     }
 
     const page = await getOrCreateAboutUsPage();
     let imageCloud, iconCloud;
 
+    imageCloud = await handleCloudinaryUpload(req, req.files['image'][0]);
     try {
-        imageCloud = await uploadToCloud(req.files['image'][0].path);
-        iconCloud = await uploadToCloud(req.files['icon'][0].path);
+        iconCloud = await handleCloudinaryUpload(req, req.files['icon'][0]);
     } catch (err) {
         if (imageCloud) await deleteFromCloud(imageCloud.publicId);
-        if (iconCloud) await deleteFromCloud(iconCloud.publicId);
-        safeCleanup(req);
         throw err;
     }
 
-    let finalParagraphs = [];
-    if (paragraphs) {
-        finalParagraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
-    }
+    const finalParagraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
 
     const newSection = {
         image: imageCloud,
@@ -287,11 +228,11 @@ const addMissionSection = asyncWrapper(async (req, res) => {
 
     page.missionVision.push(newSection);
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.missionVision[page.missionVision.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Mission/Vision section added successfully',
         data: added
@@ -306,42 +247,33 @@ const updateMissionSection = asyncWrapper(async (req, res) => {
     const section = page.missionVision.id(sectionId);
 
     if (!section) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Mission/Vision section not found');
     }
 
     let newImage = section.image;
     let newIcon = section.icon;
 
-    try {
-        if (req.files && req.files['image']) {
-            const cloudResult = await uploadToCloud(req.files['image'][0].path);
-            await deleteFromCloud(section.image.publicId);
-            newImage = cloudResult;
-        }
+    if (req.files && req.files['image']) {
+        newImage = await handleCloudinaryUpload(req, req.files['image'][0], section.image.publicId);
+    }
 
-        if (req.files && req.files['icon']) {
-            const cloudResult = await uploadToCloud(req.files['icon'][0].path);
-            await deleteFromCloud(section.icon.publicId);
-            newIcon = cloudResult;
-        }
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
+    if (req.files && req.files['icon']) {
+        newIcon = await handleCloudinaryUpload(req, req.files['icon'][0], section.icon.publicId);
     }
 
     if (title !== undefined) section.title = title;
     if (heading !== undefined) section.heading = heading;
     if (paragraphs !== undefined) {
-        section.paragraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
+        section.paragraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
     }
     section.image = newImage;
     section.icon = newIcon;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Mission/Vision section updated successfully',
         data: section
@@ -358,13 +290,17 @@ const deleteMissionSection = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Mission/Vision section not found');
     }
 
-    await deleteFromCloud(section.image.publicId);
-    await deleteFromCloud(section.icon.publicId);
+    try {
+        await deleteFromCloud(section.image.publicId);
+        await deleteFromCloud(section.icon.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting mission section assets from Cloudinary:", error);
+    }
 
     page.missionVision.pull(sectionId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Mission/Vision section deleted successfully'
     });
@@ -377,22 +313,15 @@ const addPartner = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateAboutUsPage();
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     page.partners.push({ logo: cloudResult });
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.partners[page.partners.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Partner logo added successfully',
         data: added
@@ -409,12 +338,16 @@ const deletePartner = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Partner not found');
     }
 
-    await deleteFromCloud(partner.logo.publicId);
+    try {
+        await deleteFromCloud(partner.logo.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting partner logo from Cloudinary:", error);
+    }
 
     page.partners.pull(partnerId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Partner deleted successfully'
     });
@@ -429,19 +362,8 @@ const addArticle = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateAboutUsPage();
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
-
-    let finalParagraphs = [];
-    if (paragraphs) {
-        finalParagraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
+    const finalParagraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
 
     const newArticle = {
         icon: cloudResult,
@@ -451,11 +373,11 @@ const addArticle = asyncWrapper(async (req, res) => {
 
     page.articles.push(newArticle);
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.articles[page.articles.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Article added successfully',
         data: added
@@ -470,33 +392,25 @@ const updateArticle = asyncWrapper(async (req, res) => {
     const article = page.articles.id(articleId);
 
     if (!article) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Article not found');
     }
 
     let newIcon = article.icon;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-        await deleteFromCloud(article.icon.publicId);
-        newIcon = cloudResult;
+        newIcon = await handleCloudinaryUpload(req, req.file, article.icon.publicId);
     }
 
     if (heading !== undefined) article.heading = heading;
     if (paragraphs !== undefined) {
-        article.paragraphs = typeof paragraphs === 'string' ? JSON.parse(paragraphs) : paragraphs;
+        article.paragraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
     }
     article.icon = newIcon;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Article updated successfully',
         data: article
@@ -513,12 +427,16 @@ const deleteArticle = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Article not found');
     }
 
-    await deleteFromCloud(article.icon.publicId);
+    try {
+        await deleteFromCloud(article.icon.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting article icon from Cloudinary:", error);
+    }
 
     page.articles.pull(articleId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Article deleted successfully'
     });
@@ -533,14 +451,7 @@ const addStrategicPartner = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateAboutUsPage();
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     const newPartner = {
         image: cloudResult,
@@ -549,11 +460,11 @@ const addStrategicPartner = asyncWrapper(async (req, res) => {
 
     page.strategicPartnerships.push(newPartner);
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.strategicPartnerships[page.strategicPartnerships.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Strategic partner added successfully',
         data: added
@@ -568,30 +479,22 @@ const updateStrategicPartner = asyncWrapper(async (req, res) => {
     const partner = page.strategicPartnerships.id(partnerId);
 
     if (!partner) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Strategic partner not found');
     }
 
     let newImage = partner.image;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-        await deleteFromCloud(partner.image.publicId);
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, partner.image.publicId);
     }
 
     if (text !== undefined) partner.text = text;
     partner.image = newImage;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Strategic partner updated successfully',
         data: partner
@@ -608,12 +511,16 @@ const deleteStrategicPartner = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Strategic partner not found');
     }
 
-    await deleteFromCloud(partner.image.publicId);
+    try {
+        await deleteFromCloud(partner.image.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting strategic partner image from Cloudinary:", error);
+    }
 
     page.strategicPartnerships.pull(partnerId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Strategic partner deleted successfully'
     });
@@ -628,24 +535,17 @@ const addCoreMember = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateAboutUsPage();
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     const newMember = { image: cloudResult, name, designation };
     page.coreTeam.push(newMember);
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.coreTeam[page.coreTeam.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Core team member added successfully',
         data: added
@@ -660,21 +560,13 @@ const updateCoreMember = asyncWrapper(async (req, res) => {
     const member = page.coreTeam.id(memberId);
 
     if (!member) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Core team member not found');
     }
 
     let newImage = member.image;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-        await deleteFromCloud(member.image.publicId);
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, member.image.publicId);
     }
 
     if (name !== undefined) member.name = name;
@@ -682,9 +574,9 @@ const updateCoreMember = asyncWrapper(async (req, res) => {
     member.image = newImage;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Core team member updated successfully',
         data: member
@@ -701,12 +593,16 @@ const deleteCoreMember = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Core team member not found');
     }
 
-    await deleteFromCloud(member.image.publicId);
+    try {
+        await deleteFromCloud(member.image.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting core member image from Cloudinary:", error);
+    }
 
     page.coreTeam.pull(memberId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Core team member deleted successfully'
     });
@@ -721,24 +617,17 @@ const addSupportingMember = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateAboutUsPage();
-    let cloudResult;
-
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
     const newMember = { image: cloudResult, name, designation };
     page.supportingTeam.push(newMember);
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.supportingTeam[page.supportingTeam.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Supporting team member added successfully',
         data: added
@@ -753,21 +642,13 @@ const updateSupportingMember = asyncWrapper(async (req, res) => {
     const member = page.supportingTeam.id(memberId);
 
     if (!member) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Supporting team member not found');
     }
 
     let newImage = member.image;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-        await deleteFromCloud(member.image.publicId);
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, member.image.publicId);
     }
 
     if (name !== undefined) member.name = name;
@@ -775,9 +656,9 @@ const updateSupportingMember = asyncWrapper(async (req, res) => {
     member.image = newImage;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Supporting team member updated successfully',
         data: member
@@ -794,12 +675,16 @@ const deleteSupportingMember = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Supporting team member not found');
     }
 
-    await deleteFromCloud(member.image.publicId);
+    try {
+        await deleteFromCloud(member.image.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting supporting member image from Cloudinary:", error);
+    }
 
     page.supportingTeam.pull(memberId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Supporting team member deleted successfully'
     });

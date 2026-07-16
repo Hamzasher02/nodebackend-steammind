@@ -1,17 +1,12 @@
-import fs from 'fs';
+import cleanupUploadedFiles, {
+    handleCloudinaryUpload,
+    safeJsonParse
+} from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import productsPageModel from '../model/productspage.model.js';
-import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function to remove local uploads
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
-    }
-}
+import { deleteFromCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
 
 // Helper to get or create the page document
 async function getOrCreateProductsPage() {
@@ -28,7 +23,7 @@ async function getOrCreateProductsPage() {
 // 1. Get Products Page Content
 const getProductsPage = asyncWrapper(async (req, res) => {
     const page = await getOrCreateProductsPage();
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: page
     });
@@ -41,18 +36,7 @@ const updateHero = asyncWrapper(async (req, res) => {
 
     let newImage = page.hero.backgroundImage;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-
-        if (page.hero.backgroundImage?.publicId) {
-            await deleteFromCloud(page.hero.backgroundImage.publicId);
-        }
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, page.hero.backgroundImage?.publicId);
     }
 
     if (heading !== undefined) page.hero.heading = heading;
@@ -60,9 +44,9 @@ const updateHero = asyncWrapper(async (req, res) => {
     page.hero.backgroundImage = newImage;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Products Page Hero section updated successfully',
         data: page.hero
@@ -78,19 +62,9 @@ const addSection = asyncWrapper(async (req, res) => {
     }
 
     const page = await getOrCreateProductsPage();
-    let cloudResult;
+    const cloudResult = await handleCloudinaryUpload(req, req.file);
 
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
-
-    let finalBlocks = [];
-    if (blocks) {
-        finalBlocks = typeof blocks === 'string' ? JSON.parse(blocks) : blocks;
-    }
+    const finalBlocks = safeJsonParse(req, blocks, 'Invalid blocks JSON format') || [];
 
     const newSection = {
         image: cloudResult,
@@ -101,11 +75,11 @@ const addSection = asyncWrapper(async (req, res) => {
 
     page.sections.push(newSection);
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = page.sections[page.sections.length - 1];
 
-    res.status(201).json({
+    res.status(StatusCodes.CREATED).json({
         success: true,
         message: 'Product section added successfully',
         data: added
@@ -121,35 +95,26 @@ const updateSection = asyncWrapper(async (req, res) => {
     const section = page.sections.id(sectionId);
 
     if (!section) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Product section not found');
     }
 
     let newImage = section.image;
     if (req.file) {
-        let cloudResult;
-        try {
-            cloudResult = await uploadToCloud(req.file.path);
-        } catch (err) {
-            safeCleanup(req);
-            throw err;
-        }
-
-        await deleteFromCloud(section.image.publicId);
-        newImage = cloudResult;
+        newImage = await handleCloudinaryUpload(req, req.file, section.image.publicId);
     }
 
     if (heading !== undefined) section.heading = heading;
     if (description !== undefined) section.description = description;
     if (blocks !== undefined) {
-        section.blocks = typeof blocks === 'string' ? JSON.parse(blocks) : blocks;
+        section.blocks = safeJsonParse(req, blocks, 'Invalid blocks JSON format') || [];
     }
     section.image = newImage;
 
     await page.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Product section updated successfully',
         data: section
@@ -167,12 +132,16 @@ const deleteSection = asyncWrapper(async (req, res) => {
         throw new NOT_FOUND('Product section not found');
     }
 
-    await deleteFromCloud(section.image.publicId);
+    try {
+        await deleteFromCloud(section.image.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting product section image from Cloudinary:", error);
+    }
 
     page.sections.pull(sectionId);
     await page.save();
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Product section deleted successfully'
     });

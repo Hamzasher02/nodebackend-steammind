@@ -1,18 +1,10 @@
-import fs from 'fs';
+import cleanupUploadedFiles, {
+    handleCloudinaryUpload
+} from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import logosModel from '../model/logos.model.js';
-import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function to remove local uploads
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
-    }
-}
-
+import { StatusCodes } from 'http-status-codes';
 // Helper to get or create logos document
 async function getOrCreateLogos() {
     let logos = await logosModel.findOne();
@@ -28,7 +20,7 @@ async function getOrCreateLogos() {
 // 1. Get Logos
 const getLogos = asyncWrapper(async (req, res) => {
     const logos = await getOrCreateLogos();
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         data: logos
     });
@@ -41,23 +33,13 @@ const updateHeaderLogo = asyncWrapper(async (req, res) => {
     }
 
     const logos = await getOrCreateLogos();
-    let cloudResult;
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
-
-    if (logos.headerLogo?.publicId) {
-        await deleteFromCloud(logos.headerLogo.publicId);
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file, logos.headerLogo?.publicId);
 
     logos.headerLogo = cloudResult;
     await logos.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Header logo updated successfully',
         data: logos
@@ -71,23 +53,13 @@ const updateFooterLogo = asyncWrapper(async (req, res) => {
     }
 
     const logos = await getOrCreateLogos();
-    let cloudResult;
-    try {
-        cloudResult = await uploadToCloud(req.file.path);
-    } catch (err) {
-        safeCleanup(req);
-        throw err;
-    }
-
-    if (logos.footerLogo?.publicId) {
-        await deleteFromCloud(logos.footerLogo.publicId);
-    }
+    const cloudResult = await handleCloudinaryUpload(req, req.file, logos.footerLogo?.publicId);
 
     logos.footerLogo = cloudResult;
     await logos.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
-    res.status(200).json({
+    res.status(StatusCodes.OK).json({
         success: true,
         message: 'Footer logo updated successfully',
         data: logos

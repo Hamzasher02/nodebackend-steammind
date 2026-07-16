@@ -1,17 +1,8 @@
-import fs from 'fs';
+import cleanupUploadedFiles from '../utils/cleanup.helper.utils.js';
 import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
 import asyncWrapper from '../middleware/asyncWrapper.js';
 import blogModel from '../model/blog.model.js';
 import { deleteFromCloud, uploadToCloud } from '../services/cloudinary.uploader.services.js';
-
-// Safe cleanup function to remove local uploads
-function safeCleanup(req) {
-    if (req.file) {
-        fs.unlink(req.file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
-    }
-}
 
 // Helper to parse tags string/array
 function parseTags(tagsInput) {
@@ -113,7 +104,7 @@ const createBlog = asyncWrapper(async (req, res) => {
     // Check if urlSlug is unique
     const existing = await blogModel.findOne({ urlSlug: urlSlug.toLowerCase() });
     if (existing) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new BAD_REQUEST('URL Slug is already in use. Please choose a unique slug.');
     }
 
@@ -121,7 +112,7 @@ const createBlog = asyncWrapper(async (req, res) => {
     try {
         cloudResult = await uploadToCloud(req.file.path);
     } catch (err) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw err;
     }
 
@@ -138,7 +129,7 @@ const createBlog = asyncWrapper(async (req, res) => {
         cards: []
     });
 
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     res.status(201).json({
         success: true,
@@ -154,14 +145,14 @@ const updateBlog = asyncWrapper(async (req, res) => {
 
     const blog = await blogModel.findById(blogId);
     if (!blog) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Blog post not found');
     }
 
     if (urlSlug) {
         const existing = await blogModel.findOne({ urlSlug: urlSlug.toLowerCase(), _id: { $ne: blogId } });
         if (existing) {
-            safeCleanup(req);
+            cleanupUploadedFiles(req);
             throw new BAD_REQUEST('URL Slug is already in use by another blog post.');
         }
         blog.urlSlug = urlSlug.toLowerCase();
@@ -173,7 +164,7 @@ const updateBlog = asyncWrapper(async (req, res) => {
         try {
             cloudResult = await uploadToCloud(req.file.path);
         } catch (err) {
-            safeCleanup(req);
+            cleanupUploadedFiles(req);
             throw err;
         }
 
@@ -193,7 +184,7 @@ const updateBlog = asyncWrapper(async (req, res) => {
     blog.featuredImage = newImage;
 
     await blog.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     res.status(200).json({
         success: true,
@@ -236,7 +227,7 @@ const addBlogCard = asyncWrapper(async (req, res) => {
 
     const blog = await blogModel.findById(blogId);
     if (!blog) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Blog post not found');
     }
 
@@ -245,7 +236,7 @@ const addBlogCard = asyncWrapper(async (req, res) => {
         try {
             cardImage = await uploadToCloud(req.file.path);
         } catch (err) {
-            safeCleanup(req);
+            cleanupUploadedFiles(req);
             throw err;
         }
     }
@@ -263,7 +254,7 @@ const addBlogCard = asyncWrapper(async (req, res) => {
 
     blog.cards.push(newCard);
     await blog.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     const added = blog.cards[blog.cards.length - 1];
 
@@ -281,13 +272,13 @@ const updateBlogCard = asyncWrapper(async (req, res) => {
 
     const blog = await blogModel.findById(blogId);
     if (!blog) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Blog post not found');
     }
 
     const card = blog.cards.id(cardId);
     if (!card) {
-        safeCleanup(req);
+        cleanupUploadedFiles(req);
         throw new NOT_FOUND('Blog card not found');
     }
 
@@ -297,7 +288,7 @@ const updateBlogCard = asyncWrapper(async (req, res) => {
         try {
             cloudResult = await uploadToCloud(req.file.path);
         } catch (err) {
-            safeCleanup(req);
+            cleanupUploadedFiles(req);
             throw err;
         }
 
@@ -317,7 +308,7 @@ const updateBlogCard = asyncWrapper(async (req, res) => {
     card.image = newImage;
 
     await blog.save();
-    safeCleanup(req);
+    cleanupUploadedFiles(req);
 
     res.status(200).json({
         success: true,
