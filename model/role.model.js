@@ -8,6 +8,7 @@ export const ROUTES = [
     "activity log",
     "deletion history",
     "website management",
+    "chat moderation",
 ];
 
 export const PERMISSIONS = ["read", "write", "update", "delete"];

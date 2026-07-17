@@ -1,4 +1,5 @@
 import { body } from 'express-validator';
+import { validateJsonArray } from '../utils/cleanup.helper.utils.js';
 
 const campSection1Validator = () => [
     body('heading')
@@ -7,19 +8,7 @@ const campSection1Validator = () => [
         .trim(),
     body('paragraphs')
         .optional()
-        .custom((value) => {
-            if (typeof value === 'string') {
-                try {
-                    const parsed = JSON.parse(value);
-                    if (!Array.isArray(parsed)) throw new Error();
-                } catch {
-                    throw new Error('Paragraphs must be a valid JSON array');
-                }
-            } else if (!Array.isArray(value)) {
-                throw new Error('Paragraphs must be an array of strings');
-            }
-            return true;
-        })
+        .custom(validateJsonArray('Paragraphs must be a valid JSON array', 'Paragraphs must be an array of strings'))
 ];
 
 const campDetailValidator = () => [

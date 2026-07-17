@@ -1,4 +1,5 @@
 import { body } from 'express-validator';
+import { validateJsonArray } from '../utils/cleanup.helper.utils.js';
 
 const updateProductsHeroValidator = () => [
     body('heading')
@@ -22,19 +23,7 @@ const productSectionValidator = () => [
         .trim(),
     body('blocks')
         .optional()
-        .custom((value) => {
-            if (typeof value === 'string') {
-                try {
-                    const parsed = JSON.parse(value);
-                    if (!Array.isArray(parsed)) throw new Error();
-                } catch {
-                    throw new Error('Blocks must be a valid JSON array of block objects');
-                }
-            } else if (!Array.isArray(value)) {
-                throw new Error('Blocks must be an array of block objects');
-            }
-            return true;
-        })
+        .custom(validateJsonArray('Blocks must be a valid JSON array of block objects', 'Blocks must be an array of block objects'))
 ];
 
 export {

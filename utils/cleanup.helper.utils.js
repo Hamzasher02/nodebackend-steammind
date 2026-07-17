@@ -91,5 +91,22 @@ function safeJsonParse(req, data, errorMessage = "Invalid JSON format") {
     }
 }
 
-export { handleCloudinaryUpload, handleMultipleCloudinaryUploads, safeJsonParse };
+function validateJsonArray(message = "Invalid JSON format", arrayMessage) {
+    const fallbackMessage = arrayMessage || message;
+    return (value) => {
+        if (typeof value === 'string') {
+            try {
+                const parsed = JSON.parse(value);
+                if (!Array.isArray(parsed)) throw new Error();
+            } catch {
+                throw new Error(message);
+            }
+        } else if (!Array.isArray(value)) {
+            throw new Error(fallbackMessage);
+        }
+        return true;
+    };
+}
+
+export { handleCloudinaryUpload, handleMultipleCloudinaryUploads, safeJsonParse, validateJsonArray };
 export default cleanupUploadedFiles;

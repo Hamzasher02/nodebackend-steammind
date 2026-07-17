@@ -258,9 +258,28 @@ const uploadDocument = asyncWrapper(async (req, res) => {
 // 8. Get document details
 const getDocumentDetails = asyncWrapper(async (req, res) => {
     const { documentId } = req.params;
+    const userId = req.user.userId;
 
     const doc = await documentModel.findOne({ _id: documentId, isDeleted: false });
     if (!doc) {
+        throw new NOT_FOUND('Document not found');
+    }
+
+    // Resolve associated message
+    const message = await messageModel.findOne({ _id: doc.messageId, isDeleted: false });
+    if (!message) {
+        throw new NOT_FOUND('Document not found');
+    }
+
+    // Resolve associated chat
+    const chat = await chatModel.findOne({ _id: message.chatId, isDeleted: false });
+    if (!chat) {
+        throw new NOT_FOUND('Document not found');
+    }
+
+    // Verify user participation
+    const isParticipant = chat.participants.some(p => p.toString() === userId.toString());
+    if (!isParticipant) {
         throw new NOT_FOUND('Document not found');
     }
 

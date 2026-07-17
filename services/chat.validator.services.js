@@ -8,8 +8,15 @@ const createChatValidator = () => [
 
 const sendMessageValidator = () => [
     body('messageText')
-        .optional()
         .trim()
+        .custom((value, { req }) => {
+            const text = typeof value === 'string' ? value.trim() : '';
+            const hasFile = !!(req.file || (req.files && (Array.isArray(req.files) ? req.files.length : Object.keys(req.files).length)));
+            if (!text && !hasFile) {
+                throw new Error('Message must contain at least message text or an uploaded file');
+            }
+            return true;
+        })
 ];
 
 const editMessageValidator = () => [

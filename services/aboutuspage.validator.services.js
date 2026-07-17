@@ -1,21 +1,10 @@
 import { body } from 'express-validator';
+import { validateJsonArray } from '../utils/cleanup.helper.utils.js';
 
 const introductionValidator = () => [
     body('paragraphs')
         .notEmpty().withMessage('Paragraphs are required')
-        .custom((value) => {
-            if (typeof value === 'string') {
-                try {
-                    const parsed = JSON.parse(value);
-                    if (!Array.isArray(parsed)) throw new Error();
-                } catch {
-                    throw new Error('Paragraphs must be a valid JSON array');
-                }
-            } else if (!Array.isArray(value)) {
-                throw new Error('Paragraphs must be an array of strings');
-            }
-            return true;
-        })
+        .custom(validateJsonArray('Paragraphs must be a valid JSON array', 'Paragraphs must be an array of strings'))
 ];
 
 const platformValidator = () => [
@@ -25,19 +14,7 @@ const platformValidator = () => [
         .trim(),
     body('paragraphs')
         .optional()
-        .custom((value) => {
-            if (typeof value === 'string') {
-                try {
-                    const parsed = JSON.parse(value);
-                    if (!Array.isArray(parsed)) throw new Error();
-                } catch {
-                    throw new Error('Paragraphs must be a valid JSON array');
-                }
-            } else if (!Array.isArray(value)) {
-                throw new Error('Paragraphs must be an array of strings');
-            }
-            return true;
-        })
+        .custom(validateJsonArray('Paragraphs must be a valid JSON array', 'Paragraphs must be an array of strings'))
 ];
 
 const missionVisionValidator = () => [
@@ -51,19 +28,7 @@ const missionVisionValidator = () => [
         .trim(),
     body('paragraphs')
         .optional()
-        .custom((value) => {
-            if (typeof value === 'string') {
-                try {
-                    const parsed = JSON.parse(value);
-                    if (!Array.isArray(parsed)) throw new Error();
-                } catch {
-                    throw new Error('Paragraphs must be a valid JSON array');
-                }
-            } else if (!Array.isArray(value)) {
-                throw new Error('Paragraphs must be an array of strings');
-            }
-            return true;
-        })
+        .custom(validateJsonArray('Paragraphs must be a valid JSON array', 'Paragraphs must be an array of strings'))
 ];
 
 const articleValidator = () => [
@@ -73,19 +38,7 @@ const articleValidator = () => [
         .trim(),
     body('paragraphs')
         .optional()
-        .custom((value) => {
-            if (typeof value === 'string') {
-                try {
-                    const parsed = JSON.parse(value);
-                    if (!Array.isArray(parsed)) throw new Error();
-                } catch {
-                    throw new Error('Paragraphs must be a valid JSON array');
-                }
-            } else if (!Array.isArray(value)) {
-                throw new Error('Paragraphs must be an array of strings');
-            }
-            return true;
-        })
+        .custom(validateJsonArray('Paragraphs must be a valid JSON array', 'Paragraphs must be an array of strings'))
 ];
 
 const strategicPartnershipValidator = () => [
