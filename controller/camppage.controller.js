@@ -1,0 +1,260 @@
+import cleanupUploadedFiles, {
+    handleCloudinaryUpload,
+    safeJsonParse
+} from '../utils/cleanup.helper.utils.js';
+import { BAD_REQUEST, NOT_FOUND } from '../error/error.js';
+import asyncWrapper from '../middleware/asyncWrapper.js';
+import campPageModel from '../model/camppage.model.js';
+import { deleteFromCloud } from '../services/cloudinary.uploader.services.js';
+import { StatusCodes } from 'http-status-codes';
+import mongoose from 'mongoose';
+
+// Helper to get or create camp page document based on pageType (summer/winter)
+async function getOrCreateCampPage(pageType) {
+    let page = await campPageModel.findOne({ pageType });
+    if (!page) {
+        page = await campPageModel.create({
+            pageType,
+            section1: { image: null, heading: '', paragraphs: [] },
+            details: [],
+            advantages: []
+        });
+    }
+    return page;
+}
+
+// 1. Get Camp Page Content
+const getCampPage = asyncWrapper(async (req, res) => {
+    const { pageType } = req.params;
+    const page = await getOrCreateCampPage(pageType);
+    res.status(StatusCodes.OK).json({
+        success: true,
+        data: page
+    });
+});
+
+// 2. Update Section 1
+const updateSection1 = asyncWrapper(async (req, res) => {
+    const { pageType } = req.params;
+    const { heading, paragraphs, image: imageUrl } = req.body;
+
+    const page = await getOrCreateCampPage(pageType);
+    let newImage = page.section1.image;
+
+    if (req.file) {
+        newImage = await handleCloudinaryUpload(req, req.file, page.section1.image?.publicId);
+    } else if (imageUrl && typeof imageUrl === 'string') {
+        // JSON body fallback — accept a plain URL string for Postman / headless testing
+        newImage = { publicId: imageUrl, secureUrl: imageUrl };
+    }
+
+    if (heading !== undefined) page.section1.heading = heading;
+    if (paragraphs !== undefined) {
+        page.section1.paragraphs = safeJsonParse(req, paragraphs, 'Invalid paragraphs JSON format') || [];
+    }
+    page.section1.image = newImage;
+
+    await page.save();
+    cleanupUploadedFiles(req);
+
+    res.status(StatusCodes.OK).json({
+        success: true,
+        message: 'Section 1 updated successfully',
+        data: page.section1
+    });
+});
+
+// 3. Add Detail Item
+const addDetailItem = asyncWrapper(async (req, res) => {
+    const { pageType } = req.params;
+    const { label, value, icon: iconUrl } = req.body;
+
+    let iconData;
+    if (req.file) {
+        iconData = await handleCloudinaryUpload(req, req.file);
+    } else if (iconUrl && typeof iconUrl === 'string') {
+        // JSON body fallback — accept a plain URL string for Postman / headless testing
+        iconData = { publicId: iconUrl, secureUrl: iconUrl };
+    } else {
+        throw new BAD_REQUEST('Detail icon image is required');
+    }
+
+    if (!label) throw new BAD_REQUEST('label is required');
+    if (!value) throw new BAD_REQUEST('value is required');
+
+    const page = await getOrCreateCampPage(pageType);
+
+    const newDetail = {
+        icon: iconData,
+        label,
+        value
+    };
+
+    page.details.push(newDetail);
+    await page.save();
+    cleanupUploadedFiles(req);
+
+    const added = page.details[page.details.length - 1];
+
+    res.status(StatusCodes.CREATED).json({
+        success: true,
+        message: 'Detail item added successfully',
+        data: added
+    });
+});
+
+// 4. Update Detail Item
+const updateDetailItem = asyncWrapper(async (req, res) => {
+    const { pageType, detailId } = req.params;
+    const { label, value, icon: iconUrl } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(detailId)) {
+        cleanupUploadedFiles(req);
+        throw new BAD_REQUEST('Invalid Detail ID format');
+    }
+
+    const page = await getOrCreateCampPage(pageType);
+    const detail = page.details.id(detailId);
+
+    if (!detail) {
+        cleanupUploadedFiles(req);
+        throw new NOT_FOUND('Detail item not found');
+    }
+
+    let newIcon = detail.icon;
+    if (req.file) {
+        newIcon = await handleCloudinaryUpload(req, req.file, detail.icon?.publicId);
+    } else if (iconUrl && typeof iconUrl === 'string') {
+        newIcon = { publicId: iconUrl, secureUrl: iconUrl };
+    }
+
+    if (label !== undefined) detail.label = label;
+    if (value !== undefined) detail.value = value;
+    detail.icon = newIcon;
+
+    await page.save();
+    cleanupUploadedFiles(req);
+
+    res.status(StatusCodes.OK).json({
+        success: true,
+        message: 'Detail item updated successfully',
+        data: detail
+    });
+});
+
+// 5. Delete Detail Item
+const deleteDetailItem = asyncWrapper(async (req, res) => {
+    const { pageType, detailId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(detailId)) {
+        throw new BAD_REQUEST('Invalid Detail ID format');
+    }
+
+    const page = await getOrCreateCampPage(pageType);
+    const detail = page.details.id(detailId);
+
+    if (!detail) {
+        throw new NOT_FOUND('Detail item not found');
+    }
+
+    try {
+        await deleteFromCloud(detail.icon.publicId);
+    } catch (error) {
+        console.error("Non-blocking error deleting detail icon from Cloudinary:", error);
+    }
+
+    page.details.pull(detailId);
+    await page.save();
+
+    res.status(StatusCodes.OK).json({
+        success: true,
+        message: 'Detail item deleted successfully'
+    });
+});
+
+// 6. Add Advantage Card
+const addAdvantageCard = asyncWrapper(async (req, res) => {
+    const { pageType } = req.params;
+    const { title, description } = req.body;
+
+    const page = await getOrCreateCampPage(pageType);
+
+    const newAdv = {
+        title,
+        description
+    };
+
+    page.advantages.push(newAdv);
+    await page.save();
+
+    const added = page.advantages[page.advantages.length - 1];
+
+    res.status(StatusCodes.CREATED).json({
+        success: true,
+        message: 'Advantage card added successfully',
+        data: added
+    });
+});
+
+// 7. Update Advantage Card
+const updateAdvantageCard = asyncWrapper(async (req, res) => {
+    const { pageType, advantageId } = req.params;
+    const { title, description } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(advantageId)) {
+        throw new BAD_REQUEST('Invalid Advantage ID format');
+    }
+
+    const page = await getOrCreateCampPage(pageType);
+    const adv = page.advantages.id(advantageId);
+
+    if (!adv) {
+        throw new NOT_FOUND('Advantage card not found');
+    }
+
+    if (title !== undefined) adv.title = title;
+    if (description !== undefined) adv.description = description;
+
+    await page.save();
+
+    res.status(StatusCodes.OK).json({
+        success: true,
+        message: 'Advantage card updated successfully',
+        data: adv
+    });
+});
+
+// 8. Delete Advantage Card
+const deleteAdvantageCard = asyncWrapper(async (req, res) => {
+    const { pageType, advantageId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(advantageId)) {
+        throw new BAD_REQUEST('Invalid Advantage ID format');
+    }
+
+    const page = await getOrCreateCampPage(pageType);
+    const adv = page.advantages.id(advantageId);
+
+    if (!adv) {
+        throw new NOT_FOUND('Advantage card not found');
+    }
+
+    page.advantages.pull(advantageId);
+    await page.save();
+
+    res.status(StatusCodes.OK).json({
+        success: true,
+        message: 'Advantage card deleted successfully'
+    });
+});
+
+export {
+    getCampPage,
+    updateSection1,
+    addDetailItem,
+    updateDetailItem,
+    deleteDetailItem,
+    addAdvantageCard,
+    updateAdvantageCard,
+    deleteAdvantageCard
+};
